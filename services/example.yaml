@@ -1,0 +1,12 @@
+services:
+
+  - name: Example service
+    address: examplexxxxxxxx.onion
+    port: 80
+    type: http
+    path: /index.php
+
+  - name: Example btc node
+    address: nodexxxxxxxx.onion
+    port: 8333
+    type: tcp

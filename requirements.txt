@@ -1,0 +1,5 @@
+PyYAML
+requests[socks]
+PySocks
+Flask
+stem
