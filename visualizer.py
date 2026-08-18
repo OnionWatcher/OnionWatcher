@@ -60,6 +60,9 @@ def uptime_data(service_id):
 
     ev = events(service_id)
 
+    if not ev:
+         return 0, ["red"] * (UPTIME_DAYS * 24)
+
     offline = False
     offline_start = start
     offline_seconds = 0
@@ -95,24 +98,56 @@ def uptime_data(service_id):
     blocks = []
     hours = UPTIME_DAYS * 24
 
-    # Services without any state history are not assumed online.
-    # Fill the entire configured period as offline until the first event.
-    if not ev:
-        return 0, ["red"] * hours
-
     for i in range(hours):
+
         a = start + datetime.timedelta(hours=i)
         b = a + datetime.timedelta(hours=1)
 
-        failed = False
+        offline_time = 0
 
+        state = "online"
+
+        # determine state at beginning of this block
         for e in ev:
             t = datetime.datetime.fromisoformat(e["timestamp"])
-            if a <= t <= b and e["new_status"] == "offline":
-                failed = True
 
-        blocks.append("red" if failed else "green")
+            if t <= a:
+                state = e["new_status"]
+            else:
+                break
 
+
+        cursor = a
+
+        for e in ev:
+
+            t = datetime.datetime.fromisoformat(e["timestamp"])
+
+            if t <= a:
+                continue
+
+            if t >= b:
+                break
+
+            if state == "offline":
+                offline_time += (
+                    t - cursor
+                ).total_seconds()
+
+            state = e["new_status"]
+            cursor = t
+
+
+        if state == "offline":
+            offline_time += (
+                b - cursor
+            ).total_seconds()
+
+
+        # mark hour red if any significant outage occurred
+        blocks.append(
+            "red" if offline_time > 0 else "green"
+        )
     return uptime, blocks
 
 
@@ -137,6 +172,7 @@ tr.service-dark,
     background:#123;
 }
 
+.unknown { color:#cc3333; }
 .green { color:#00ff66; }
 .red { color:#cc3333; }
 
