@@ -469,12 +469,16 @@ class Prober:
             return self.tcp(service)
 
 
+        if service["type"] == "monerod":
+
+            return self.monerod(service)
+
+
         log(
             f"Unknown service type: {service['type']}"
         )
 
         return False
-
 
 
     def http(self, service):
@@ -499,7 +503,33 @@ class Prober:
 
             return False
 
+    def monerod(self, service):
 
+        url = (
+            f"http://{service['host']}:"
+            f"{service['port']}"
+            "/get_info"
+        )
+
+        try:
+
+            response = self.session.get(
+                url,
+                timeout=30
+            )
+
+            if response.status_code != 200:
+                return False
+
+
+            data = response.json()
+
+            return data.get("status") == "OK"
+
+
+        except Exception:
+
+            return False
 
     def tcp(self, service):
 
