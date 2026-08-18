@@ -601,6 +601,9 @@ def main():
         )
     )
 
+    log("YAML services:")
+    for s in yaml_services:
+        log(f"{s['name']} {s['address']}")
 
     db.sync_services(
         yaml_services
