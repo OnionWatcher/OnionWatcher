@@ -34,7 +34,7 @@ OnionWatcher is independent software and is not affiliated with or endorsed by t
 - Configurable uptime calculation window
 
 
-# Requirements
+## Requirements
 
 - Python 3.9+
 - Tor running locally
@@ -84,6 +84,26 @@ with Controller.from_port(port=9051) as c:
     print('Tor control OK')
 "
 ```
+
+## Installation and upgrade
+
+Clone:
+```
+git clone https://github.com/onionwatcher/onionwatcher
+cd onionwatcher
+```
+
+Exclude config files from future pulls:
+```
+ git update-index --assume-unchanged config.yaml
+ git update-index --assume-unchanged services/*.yaml
+```
+
+When you want to upgrade, from within the `onionwatcher` folder execute:
+```
+git pull
+```
+git will ignore your config files.
 
 ## Configuration
 
