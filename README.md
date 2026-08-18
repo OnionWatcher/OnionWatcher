@@ -111,14 +111,12 @@ Services are defined as YAML files inside the services directory.
 Example:
 
 services/example.yaml
+```
 services:
-
-
   - name: Example Bitcoin node
     address: examplexxxxxxxx.onion
     port: 8333
     type: tcp
-
 
   - name: Example website
     address: examplexxxxxxxx.onion
@@ -126,11 +124,18 @@ services:
     type: http
     path: /
 
+  - name: Example monero node
+    address: examplexxxxxxxx.onion
+    port: 18081
+    type: monerod
+```
+
 Supported types:
-
-http	HTTP request check
-tcp	TCP connection check
-
+```
+http     HTTP request check
+tcp	     TCP connection check
+monerod  monerod node witb open RPC
+```
 ### Running OnionWatcher
 
 Start the monitor:
