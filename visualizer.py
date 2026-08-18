@@ -134,7 +134,7 @@ tr.service-dark,
 
 .service-gray,
 .details-gray {
-    background:#333333;
+    background:#123;
 }
 
 .green { color:#00ff66; }
