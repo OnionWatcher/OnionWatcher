@@ -2,6 +2,8 @@
 
 A lightweight uptime monitor for Tor onion services.
 
+![OnionWatcher dashboard](docs/images/dashboard.png)
+
 OnionWatcher continuously monitors configured `.onion` services, records availability history, automatically rotates Tor circuits after failures, and provides a web dashboard for uptime visualization.
 
 It is designed for operators running services accessible through Tor, such as:
@@ -154,7 +156,7 @@ relay1 -> relay2 -> relay3
 Added retry (1/3)
 ```
 
-Running the dashboard
+Running the dashboard (only meant for local use)
 
 Start:
 ```
