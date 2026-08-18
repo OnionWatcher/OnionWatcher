@@ -10,3 +10,8 @@ services:
     address: nodexxxxxxxx.onion
     port: 8333
     type: tcp
+
+  - name: Example monero node
+    address: xmrxxxxxxxx.onion
+    port: 18081
+    type: monerod
