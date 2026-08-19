@@ -20,6 +20,33 @@ def db():
     conn.row_factory = sqlite3.Row
     return conn
 
+def format_duration(seconds):
+    seconds = int(seconds)
+
+    days = seconds // 86400
+    seconds %= 86400
+
+    hours = seconds // 3600
+    seconds %= 3600
+
+    minutes = seconds // 60
+
+    parts = []
+
+    if days:
+        parts.append(f"{days}d")
+
+    if hours:
+        parts.append(f"{hours}h")
+
+    if minutes:
+        parts.append(f"{minutes}m")
+
+    if not parts:
+        return "<1m"
+
+    return " ".join(parts)
+
 
 def services():
     c = db()
@@ -188,7 +215,7 @@ tr.service-dark,
 .details {
     display:none;
     padding:10px;
-    height:4em;
+    height:8em;
     overflow-y:auto;
     width:100%;
     box-sizing:border-box;
@@ -293,14 +320,55 @@ def index():
 
 @app.route("/service/<int:id>")
 def service_page(id):
+
+    ev = events(id)
+
+    rev = list(reversed(ev))
+
     result = ""
 
-    for e in reversed(events(id)):
-        color = "#00ff66" if e["new_status"] == "online" else "#cc3333"
-        result += f'<div style="color:{color};">{e["timestamp"]}</div>'
+    now = datetime.datetime.utcnow()
+
+    for i, e in enumerate(rev):
+
+        t = datetime.datetime.fromisoformat(
+            e["timestamp"]
+        )
+
+        if i == 0:
+
+            duration = (
+                now - t
+            ).total_seconds()
+
+        else:
+
+            next_event = rev[i-1]
+
+            next_time = datetime.datetime.fromisoformat(
+                next_event["timestamp"]
+            )
+
+            duration = (
+                next_time - t
+            ).total_seconds()
+
+
+        color = (
+            "#00ff66"
+            if e["new_status"] == "online"
+            else "#cc3333"
+        )
+
+
+        result += (
+            f'<div style="color:{color};">'
+            f'{e["timestamp"]} '
+            f'({format_duration(duration)})'
+            f'</div>'
+        )
+
 
     return result
-
-
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=PORT)
