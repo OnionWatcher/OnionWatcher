@@ -253,7 +253,7 @@ function showDetails(id) {
 
 <tr>
 <th>Service</th>
-<th>Last period</th>
+<th>Last {{ UPTIME_DAYS }} {{ "day" if UPTIME_DAYS == 1 else "days" }}</th>
 <th>Uptime</th>
 <th>Onion</th>
 </tr>
@@ -314,7 +314,8 @@ def index():
         INDEX,
         services=svcs,
         uptime=uptime,
-        bars=bars
+        bars=bars,
+        UPTIME_DAYS=UPTIME_DAYS
     )
 
 
