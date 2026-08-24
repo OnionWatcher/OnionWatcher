@@ -259,6 +259,7 @@ def print_service(service, name_width):
             )
 
     print("".join(output))
+    print()
 
 def print_dashboard():
     svcs = services()
