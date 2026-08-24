@@ -181,7 +181,12 @@ relay1 -> relay2 -> relay3
 Added retry (1/3)
 ```
 
-Running the dashboard (only meant for local use)
+When `onionwatcher` starts, it will cross-reference the config files with the service definitions stored in the database:
+- if onion matches, but service name is different in config, the database will be updated using service name from config
+- if service name matches, but onion is different in config, the database will be updated using onion from config
+- if a service definition in database has no match within config files anymore, the service and its monitoring history will be deleted from the database
+
+### Running the dashboard (only meant for local use)
 
 Start:
 ```
@@ -190,7 +195,7 @@ python3 visualizer.py
 
 Open:
 
-http://localhost:3040
+_http://localhost:3040_
 
 The dashboard displays:
 
@@ -198,7 +203,9 @@ The dashboard displays:
 - onion address
 - uptime percentage
 - uptime timeline
-- online/offline event history
+- online/offline event history by clicking on the service name
+
+The endpoint _http://localhost:3040/status/service name_ is available for automated checks, and returns `1` if service is online, or `0` if offline. In addition, if _service name_ does not exist in the database, `0` will be returned with a 404 HTTP code.
 
 ### Failure handling
 
