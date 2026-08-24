@@ -207,6 +207,11 @@ The dashboard displays:
 
 The endpoint _http://localhost:3040/status/service name_ is available for automated checks, and returns `1` if service is online, or `0` if offline. In addition, if _service name_ does not exist in the database, `0` will be returned with a 404 HTTP code.
 
+### Running CLI visualizer
+
+`python3 cli-visualizer.py` outputs to stdout a stylized version of the web visualizer.
+`python3 cli-visualizer.py status "service name"` is the CLI counterpart of the status endpoint of the web visualizer.
+
 ### Failure handling
 
 On a failed check:
