@@ -371,5 +371,25 @@ def service_page(id):
 
 
     return result
+
+@app.route("/status/<string:service_name>")
+def status(service_name):
+    c = db()
+
+    row = c.execute("""
+        SELECT service_state.status
+        FROM services
+        JOIN service_state
+        ON services.id = service_state.service_id
+        WHERE services.name = ?
+    """, (service_name,)).fetchone()
+
+    c.close()
+
+    if row is None:
+        return "0", 404
+
+    return "1" if row["status"] == "online" else "0"
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=PORT)
