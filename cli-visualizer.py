@@ -231,21 +231,19 @@ def uptime_bar(blocks, width):
     return result
 
 
-def print_service(service):
+def print_service(service, name_width):
     uptime, blocks = uptime_data(service["id"])
 
     width = terminal_width()
+    status = service["status"].upper()
 
-    # First line:
-    # service name | uptime | onion address
     print(
-        f"{service['name']}  "
-        f"{uptime:7.2f}%  "
+        f"{service['name']:<{name_width}} "
+        f"{status:<7} "
+        f"{uptime:7.2f}%   "
         f"{service['host']}"
     )
 
-    # Second line:
-    # full-width uptime bar
     bar = uptime_bar(blocks, width)
 
     output = []
@@ -262,7 +260,6 @@ def print_service(service):
 
     print("".join(output))
 
-
 def print_dashboard():
     svcs = services()
 
@@ -270,16 +267,18 @@ def print_dashboard():
         print("No services found.")
         return 1
 
-    for i, service in enumerate(svcs):
-        if i:
-            # Do not add a third line between services.
-            # Each service therefore occupies exactly two lines.
-            pass
+    name_width = max(
+        len(s["name"])
+        for s in svcs
+    )
 
-        print_service(service)
+    for service in svcs:
+        print_service(
+            service,
+            name_width
+        )
 
     return 0
-
 
 # ----------------------------------------------------------------------
 # CLI status command
