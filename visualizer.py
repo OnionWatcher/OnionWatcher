@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 
+import base64
 import datetime
 import hashlib
 import hmac
 import sqlite3
+import time
 from pathlib import Path
 
 import yaml
@@ -16,9 +18,7 @@ from flask import Flask, abort, request, render_template_string
 
 BASE_DIR = Path(__file__).resolve().parent
 
-CONFIG_FILE = BASE_DIR / "config.yaml"
-
-with CONFIG_FILE.open("r", encoding="utf-8") as f:
+with open(BASE_DIR / "config.yaml", "r", encoding="utf-8") as f:
     config = yaml.safe_load(f) or {}
 
 DB = Path(config.get("database", "onionwatcher.db"))
@@ -35,11 +35,11 @@ UPTIME_DAYS = max(
 
 # Password SHA-256 digest.
 #
-# Example:
+# Generate with:
 #
-#   printf '%s' 'your-long-password' | sha256sum
+#   printf '%s' 'your-password' | sha256sum
 #
-# Put the resulting 64-character hexadecimal digest in config.yaml:
+# Then put the 64-character digest in config.yaml:
 #
 #   password_sha256: "..."
 #
@@ -49,33 +49,42 @@ PASSWORD_SHA256 = str(
 
 if (
     len(PASSWORD_SHA256) != 64
-    or any(c not in "0123456789abcdef" for c in PASSWORD_SHA256)
+    or any(
+        c not in "0123456789abcdef"
+        for c in PASSWORD_SHA256
+    )
 ):
     raise RuntimeError(
         "config.yaml must contain a valid 64-character "
         "password_sha256 hexadecimal digest"
     )
 
-# History display is bounded.
+# Maximum number of history events displayed when clicking a service.
 #
 # This does NOT affect uptime calculation.
 MAX_HISTORY_EVENTS = max(
     1,
-    min(int(config.get("max_history_events", 1000)), 10000),
+    min(
+        int(config.get("max_history_events", 1000)),
+        10000,
+    ),
 )
 
-# Authentication failure throttling.
-#
-# This is deliberately simple and bounded. It is not intended to replace
-# Tor access control.
+# Simple bounded authentication lockout.
 AUTH_MAX_FAILURES = max(
     1,
-    min(int(config.get("auth_max_failures", 10)), 1000),
+    min(
+        int(config.get("auth_max_failures", 10)),
+        1000,
+    ),
 )
 
 AUTH_LOCKOUT_SECONDS = max(
     1,
-    min(int(config.get("auth_lockout_seconds", 60)), 3600),
+    min(
+        int(config.get("auth_lockout_seconds", 60)),
+        3600,
+    ),
 )
 
 
@@ -88,10 +97,6 @@ app = Flask(
     static_folder=None,
 )
 
-# No Flask session is used.
-# No cookies are required.
-# HTTP Basic Authentication is used only to request the password.
-
 
 # ============================================================================
 # Database
@@ -101,8 +106,8 @@ def db():
     """
     Open SQLite read-only.
 
-    Filesystem permissions must independently ensure that the account
-    running this process cannot modify the database or its directory.
+    Filesystem permissions should independently prevent this process
+    from modifying the database.
     """
 
     uri = DB.resolve().as_uri() + "?mode=ro"
@@ -130,13 +135,7 @@ auth_locked_until = 0.0
 
 
 def unauthorized():
-    """
-    Return a Basic Auth challenge.
-
-    Only the password is meaningful. The username is deliberately ignored.
-    """
-
-    response = (
+    return (
         "Authentication required",
         401,
         {
@@ -145,32 +144,30 @@ def unauthorized():
         },
     )
 
-    return response
-
 
 def authenticated():
     """
-    Validate the HTTP Basic Authentication password.
+    HTTP Basic Authentication.
 
+    Only the password matters.
     The username is ignored.
 
-    The supplied password is hashed with SHA-256 and compared with the
-    configured digest using constant-time comparison.
+    The password is SHA-256 hashed and compared against the configured
+    digest using constant-time comparison.
     """
 
     global auth_failures
     global auth_locked_until
 
-    import base64
-    import time
-
     now = time.monotonic()
 
-    # Temporary lockout applies only after repeated failures.
     if now < auth_locked_until:
         return False
 
-    header = request.headers.get("Authorization", "")
+    header = request.headers.get(
+        "Authorization",
+        "",
+    )
 
     if not header.startswith("Basic "):
         return False
@@ -182,16 +179,21 @@ def authenticated():
             encoded,
             validate=True,
         ).decode("utf-8")
+
     except (
         ValueError,
         UnicodeDecodeError,
     ):
         return False
 
-    # Basic Auth is username:password.
+    # Basic Auth is:
     #
-    # The username is ignored. split(":", 1) is important because the
-    # password itself may contain ':'.
+    #     username:password
+    #
+    # Ignore the username.
+    #
+    # split(":", 1) is important because passwords may contain ':'.
+
     if ":" not in decoded:
         return False
 
@@ -205,7 +207,6 @@ def authenticated():
         supplied_digest,
         PASSWORD_SHA256,
     ):
-        # Successful authentication clears the failure state.
         auth_failures = 0
         auth_locked_until = 0.0
 
@@ -214,9 +215,11 @@ def authenticated():
     auth_failures += 1
 
     if auth_failures >= AUTH_MAX_FAILURES:
+
         auth_locked_until = (
             now + AUTH_LOCKOUT_SECONDS
         )
+
         auth_failures = 0
 
     return False
@@ -224,12 +227,6 @@ def authenticated():
 
 @app.before_request
 def require_authentication():
-    """
-    Protect every HTTP endpoint.
-
-    The application is intended to sit behind a Tor onion service.
-    Authentication is an additional application-level password boundary.
-    """
 
     if not authenticated():
         return unauthorized()
@@ -244,7 +241,7 @@ def security_headers(response):
 
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; "
-        "script-src 'none'; "
+        "script-src 'unsafe-inline'; "
         "style-src 'unsafe-inline'; "
         "img-src 'self'; "
         "object-src 'none'; "
@@ -275,18 +272,14 @@ DB_TIME_FORMAT = "%Y-%m-%dT%H:%M:%S.%f"
 
 def parse_timestamp(value):
     """
-    Accept only:
+    Parse the timestamp format used by the existing database.
 
-        YYYY-MM-DDTHH:MM:SS.ffffff
+    Example:
 
-    The database timestamp is interpreted as UTC.
+        2026-08-26T12:34:56.123456
     """
 
     if not isinstance(value, str):
-        return None
-
-    # Reject non-canonical representations explicitly.
-    if len(value) != 26:
         return None
 
     try:
@@ -294,14 +287,19 @@ def parse_timestamp(value):
             value,
             DB_TIME_FORMAT,
         )
+
     except ValueError:
         return None
 
-    return dt.replace(tzinfo=UTC)
+    return dt.replace(
+        tzinfo=UTC
+    )
 
 
 def database_timestamp(dt):
-    return dt.astimezone(UTC).strftime(
+    return dt.astimezone(
+        UTC
+    ).strftime(
         DB_TIME_FORMAT
     )
 
@@ -312,7 +310,10 @@ def database_timestamp(dt):
 
 def format_duration(seconds):
 
-    seconds = max(0, int(seconds))
+    seconds = max(
+        0,
+        int(seconds),
+    )
 
     days, seconds = divmod(
         seconds,
@@ -332,19 +333,24 @@ def format_duration(seconds):
     parts = []
 
     if days:
-        parts.append(f"{days}d")
+        parts.append(
+            f"{days}d"
+        )
 
     if hours:
-        parts.append(f"{hours}h")
+        parts.append(
+            f"{hours}h"
+        )
 
     if minutes:
-        parts.append(f"{minutes}m")
+        parts.append(
+            f"{minutes}m"
+        )
 
-    return (
-        " ".join(parts)
-        if parts
-        else "<1m"
-    )
+    if not parts:
+        return "<1m"
+
+    return " ".join(parts)
 
 
 # ============================================================================
@@ -357,19 +363,24 @@ def services():
 
     try:
 
-        return conn.execute(
+        rows = conn.execute(
             """
             SELECT
-                services.id,
-                services.name,
-                services.host,
+                services.*,
                 service_state.status
             FROM services
             JOIN service_state
-              ON services.id = service_state.service_id
+              ON services.id =
+                 service_state.service_id
+            WHERE services.id IN (
+                SELECT service_id
+                FROM service_state
+            )
             ORDER BY services.name
             """
         ).fetchall()
+
+        return rows
 
     finally:
         conn.close()
@@ -384,13 +395,12 @@ def service(service_id):
         return conn.execute(
             """
             SELECT
-                services.id,
-                services.name,
-                services.host,
+                services.*,
                 service_state.status
             FROM services
             JOIN service_state
-              ON services.id = service_state.service_id
+              ON services.id =
+                 service_state.service_id
             WHERE services.id = ?
             """,
             (service_id,),
@@ -410,10 +420,14 @@ def uptime_events(
     end,
 ):
     """
-    Fetch the state immediately before the window and every event in the
-    requested window.
+    Get:
 
-    There is deliberately no LIMIT here.
+      1. The latest event before the uptime window.
+      2. Every event inside the uptime window.
+
+    There is intentionally no LIMIT here.
+
+    Uptime calculation therefore sees every state transition it needs.
     """
 
     start_s = database_timestamp(start)
@@ -468,7 +482,7 @@ def uptime_events(
 
 
 # ============================================================================
-# History
+# History events
 # ============================================================================
 
 def history_events(service_id):
@@ -510,7 +524,7 @@ def uptime_data(service_id):
         )
     )
 
-    raw = uptime_events(
+    raw_events = uptime_events(
         service_id,
         start,
         now,
@@ -518,7 +532,7 @@ def uptime_data(service_id):
 
     events = []
 
-    for event in raw:
+    for event in raw_events:
 
         timestamp = parse_timestamp(
             event["timestamp"]
@@ -545,13 +559,15 @@ def uptime_data(service_id):
     hours = UPTIME_DAYS * 24
 
     if not events:
+
         return (
             None,
             0.0,
             ["gray"] * hours,
         )
 
-    # Establish state at the start of the reporting window.
+    # Establish state at the beginning of the reporting window.
+
     state = None
     event_index = 0
 
@@ -567,7 +583,8 @@ def uptime_data(service_id):
         state = new_state
         event_index += 1
 
-    # Events exactly at the start take effect immediately.
+    # Events exactly at the beginning take effect immediately.
+
     while event_index < len(events):
 
         timestamp, new_state = events[
@@ -602,7 +619,8 @@ def uptime_data(service_id):
         block_known = 0.0
         block_offline = 0.0
 
-        # Events are consumed exactly once.
+        # Consume events exactly once.
+
         while event_index < len(events):
 
             timestamp, new_state = events[
@@ -610,6 +628,7 @@ def uptime_data(service_id):
             ]
 
             if timestamp < current:
+
                 state = new_state
                 event_index += 1
                 continue
@@ -629,16 +648,19 @@ def uptime_data(service_id):
                     total_known += duration
 
                     if state == "online":
+
                         total_online += duration
 
                     elif state == "offline":
+
                         block_offline += duration
 
             state = new_state
             cursor = timestamp
             event_index += 1
 
-        # Account for the remainder of the block.
+        # Finish the block.
+
         if (
             cursor < block_end
             and state is not None
@@ -654,18 +676,23 @@ def uptime_data(service_id):
                 total_known += duration
 
                 if state == "online":
+
                     total_online += duration
 
                 elif state == "offline":
+
                     block_offline += duration
 
         if block_known == 0:
+
             blocks.append("gray")
 
         elif block_offline > 0:
+
             blocks.append("red")
 
         else:
+
             blocks.append("green")
 
         current = block_end
@@ -704,92 +731,144 @@ def uptime_data(service_id):
 
 
 # ============================================================================
-# Templates
+# Dashboard template
+#
+# This deliberately preserves the original AJAX/details behavior.
 # ============================================================================
 
 INDEX = """
-<!doctype html>
-
-<html lang="en">
+<html>
 
 <head>
-
-<meta charset="utf-8">
-
-<meta name="viewport"
-      content="width=device-width,initial-scale=1">
-
-<title>OnionWatcher</title>
 
 <style>
 
 body {
     font-family: monospace;
-    background: #111;
-    color: #eee;
-    margin: 2rem;
+    background:#111;
+    color:#eee;
 }
 
 table {
-    border-collapse: collapse;
-    width: 100%;
-    max-width: 1100px;
+    border-collapse:collapse;
 }
 
 td,
 th {
-    padding: 8px;
-    text-align: left;
-}
-
-tr:nth-child(even) {
-    background: #181818;
-}
-
-a {
-    color: #66aaff;
-}
-
-.online {
-    color: #00cc66;
-}
-
-.offline {
-    color: #cc3333;
-}
-
-.unknown {
-    color: #999;
+    padding:8px;
 }
 
 .bar {
-    display: flex;
-    width: 300px;
-    height: 8px;
+    display:flex;
+    width:300px;
+    height:8px;
 }
 
 .block {
-    flex: 1;
+    flex:1;
+}
+
+tr.service-row:nth-of-type(odd),
+tr.service-dark,
+.details-dark {
+    background:#000000;
+}
+
+.service-gray,
+.details-gray {
+    background:#123;
+}
+
+.unknown {
+    color:#cc3333;
+}
+
+.green {
+    color:#00ff66;
+}
+
+.red {
+    color:#cc3333;
 }
 
 .block.green {
-    background: #00aa00;
+    background:#00aa00;
 }
 
 .block.red {
-    background: #aa0000;
+    background:#aa0000;
 }
 
 .block.gray {
-    background: #555;
+    background:#555;
 }
 
-.small {
-    color: #999;
-    font-size: 0.9em;
+.online {
+    color:#00cc66;
+}
+
+.offline {
+    color:#cc3333;
+}
+
+.details {
+    display:none;
+    padding:10px;
+    height:8em;
+    overflow-y:auto;
+    width:100%;
+    box-sizing:border-box;
 }
 
 </style>
+
+<script>
+
+function showDetails(id) {
+
+    let d = document.getElementById(
+        "details-" + id
+    );
+
+    if (d.style.display === "block") {
+
+        d.style.display = "none";
+
+        return;
+    }
+
+    fetch(
+        "/service/" + id,
+        {
+            credentials: "same-origin"
+        }
+    )
+    .then(function(response) {
+
+        if (!response.ok) {
+            throw new Error(
+                "HTTP " + response.status
+            );
+        }
+
+        return response.text();
+    })
+    .then(function(text) {
+
+        d.innerHTML = text;
+
+        d.style.display = "block";
+    })
+    .catch(function() {
+
+        d.textContent =
+            "Unable to load history.";
+
+        d.style.display = "block";
+    });
+}
+
+</script>
 
 </head>
 
@@ -797,38 +876,52 @@ a {
 
 <h1>OnionWatcher</h1>
 
-<p class="small">
-Last {{ uptime_days }}
-{{ "day" if uptime_days == 1 else "days" }}.
-Uptime is calculated only over periods where the state is known.
-</p>
-
 <table>
 
-<thead>
+<colgroup>
+<col>
+<col>
+<col>
+<col>
+</colgroup>
 
 <tr>
-<th>Service</th>
-<th>History</th>
-<th>Uptime</th>
-<th>Coverage</th>
-<th>Onion</th>
+
+<th>
+Service
+</th>
+
+<th>
+Last {{ UPTIME_DAYS }}
+{{ "day" if UPTIME_DAYS == 1 else "days" }}
+</th>
+
+<th>
+Uptime
+</th>
+
+<th>
+Onion
+</th>
+
 </tr>
-
-</thead>
-
-<tbody>
 
 {% for s in services %}
 
-<tr>
+{% set rowclass =
+    'dark' if loop.index0 % 2 == 0
+    else 'gray'
+%}
+
+<tr class="service-row service-{{rowclass}}">
 
 <td>
 
-<a href="/service/{{ s.id }}"
-   class="{{ s.status }}">
+<a href="#"
+   onclick="showDetails({{s.id}}); return false;"
+   class="{{s.status}}">
 
-{{ s.name }}
+{{s.name}}
 
 </a>
 
@@ -836,12 +929,12 @@ Uptime is calculated only over periods where the state is known.
 
 <td>
 
-<div class="bar"
-     aria-label="Hourly uptime history">
+<div class="bar">
 
-{% for block in bars[s.id] %}
+{% for c in bars[s.id] %}
 
-<div class="block {{ block }}"></div>
+<div class="block {{c}}">
+</div>
 
 {% endfor %}
 
@@ -859,7 +952,9 @@ unknown
 
 {% else %}
 
-{{ "%.2f"|format(uptime[s.id]) }}%
+{{"%.2f"|format(
+    uptime[s.id]
+)}}%
 
 {% endif %}
 
@@ -867,13 +962,20 @@ unknown
 
 <td>
 
-{{ "%.2f"|format(coverage[s.id]) }}%
+{{s.host}}
 
 </td>
 
-<td>
+</tr>
 
-{{ s.host }}
+<tr class="details-row details-{{rowclass}}">
+
+<td colspan="4">
+
+<div
+    class="details"
+    id="details-{{s.id}}"
+></div>
 
 </td>
 
@@ -881,103 +983,7 @@ unknown
 
 {% endfor %}
 
-</tbody>
-
 </table>
-
-</body>
-
-</html>
-"""
-
-
-SERVICE = """
-<!doctype html>
-
-<html lang="en">
-
-<head>
-
-<meta charset="utf-8">
-
-<meta name="viewport"
-      content="width=device-width,initial-scale=1">
-
-<title>{{ service.name }} - OnionWatcher</title>
-
-<style>
-
-body {
-    font-family: monospace;
-    background: #111;
-    color: #eee;
-    margin: 2rem;
-}
-
-a {
-    color: #66aaff;
-}
-
-.online {
-    color: #00ff66;
-}
-
-.offline {
-    color: #cc3333;
-}
-
-.unknown {
-    color: #999;
-}
-
-.event {
-    margin: 0.25rem 0;
-}
-
-</style>
-
-</head>
-
-<body>
-
-<p>
-<a href="/">Back</a>
-</p>
-
-<h1>{{ service.name }}</h1>
-
-<p>
-Current status:
-<span class="{{ service.status }}">
-{{ service.status }}
-</span>
-</p>
-
-<p>
-{{ service.host }}
-</p>
-
-{% if events %}
-
-{% for event in events %}
-
-<div class="event {{ event.status }}">
-
-{{ event.timestamp }}
-
-({{ event.duration }})
-
-</div>
-
-{% endfor %}
-
-{% else %}
-
-<p class="unknown">
-No valid history available.
-</p>
-
-{% endif %}
 
 </body>
 
@@ -995,55 +1001,62 @@ def index():
     svcs = services()
 
     uptime = {}
-    coverage = {}
     bars = {}
 
     for s in svcs:
 
-        u, c, b = uptime_data(
+        u, _, b = uptime_data(
             s["id"]
         )
 
         uptime[s["id"]] = u
-        coverage[s["id"]] = c
         bars[s["id"]] = b
 
     return render_template_string(
         INDEX,
         services=svcs,
         uptime=uptime,
-        coverage=coverage,
         bars=bars,
-        uptime_days=UPTIME_DAYS,
+        UPTIME_DAYS=UPTIME_DAYS,
     )
 
 
-@app.route("/service/<int:service_id>")
-def service_page(service_id):
+# ============================================================================
+# AJAX history endpoint
+#
+# IMPORTANT:
+# This returns ONLY the HTML fragment inserted into .details.
+# It intentionally does NOT return a complete HTML document.
+# ============================================================================
 
-    svc = service(service_id)
+@app.route("/service/<int:id>")
+def service_page(id):
+
+    svc = service(id)
 
     if svc is None:
         abort(404)
 
-    raw_events = history_events(
-        service_id
-    )
+    ev = history_events(id)
 
     now = datetime.datetime.now(UTC)
 
-    parsed = []
+    result = []
 
-    for event in raw_events:
+    # history_events() returns newest first.
+
+    previous_time = now
+
+    for e in ev:
 
         timestamp = parse_timestamp(
-            event["timestamp"]
+            e["timestamp"]
         )
 
         if timestamp is None:
             continue
 
-        status = event["new_status"]
+        status = e["new_status"]
 
         if status not in (
             "online",
@@ -1051,55 +1064,40 @@ def service_page(service_id):
         ):
             continue
 
-        parsed.append(
-            (
-                timestamp,
-                status,
-            )
-        )
-
-    history = []
-
-    for index, (
-        timestamp,
-        status,
-    ) in enumerate(parsed):
-
-        if index == 0:
-            end = now
-        else:
-            end = parsed[
-                index - 1
-            ][0]
-
         duration = max(
             0,
             (
-                end - timestamp
+                previous_time
+                - timestamp
             ).total_seconds(),
         )
 
-        history.append(
-            {
-                "timestamp":
-                    timestamp.strftime(
-                        "%Y-%m-%d %H:%M:%S UTC"
-                    ),
+        if status == "online":
 
-                "status": status,
+            color = "#00ff66"
 
-                "duration":
-                    format_duration(
-                        duration
-                    ),
-            }
+        else:
+
+            color = "#cc3333"
+
+        result.append(
+            f'<div style="color:{color};">'
+            f'{e["timestamp"]} '
+            f'({format_duration(duration)})'
+            f'</div>'
         )
 
-    return render_template_string(
-        SERVICE,
-        service=svc,
-        events=history,
-    )
+        previous_time = timestamp
+
+    if not result:
+
+        return (
+            '<div style="color:#999;">'
+            'No history available.'
+            '</div>'
+        )
+
+    return "".join(result)
 
 
 @app.route(
@@ -1130,6 +1128,7 @@ def status(service_name):
         ).fetchone()
 
     finally:
+
         conn.close()
 
     if row is None:
@@ -1143,13 +1142,13 @@ def status(service_name):
 
 
 # ============================================================================
-# Localhost-only development entry point
+# Local development / direct execution
 # ============================================================================
 
 if __name__ == "__main__":
 
     app.run(
-        host="127.0.0.1",
+        host="0.0.0.0",
         port=PORT,
         debug=False,
     )
