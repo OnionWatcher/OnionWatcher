@@ -93,10 +93,15 @@ git clone https://github.com/onionwatcher/onionwatcher
 cd onionwatcher
 ```
 
-Exclude config files from future pulls:
+Create your local configs:
 ```
- git update-index --assume-unchanged config.yaml
- git update-index --assume-unchanged services/*.yaml
+mv config.yaml.example config.yaml
+nano config.yaml
+```
+and
+```
+mv services/services.yaml.example services/services.yaml
+nano services/services.yaml
 ```
 
 When you want to upgrade, from within the `onionwatcher` folder execute:
