@@ -1,3 +1,11 @@
 __pycache__/
 *.pyc
 *.pyo
+# Local deployment configuration
+config.yaml
+
+# Local service definitions
+services/*.yaml
+
+# Keep the example files tracked
+!services/example.yaml
