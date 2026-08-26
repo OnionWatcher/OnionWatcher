@@ -114,14 +114,23 @@ config.yaml
 
 Example:
 ```
+uptime_days: 7
+probe_interval: 30
+jitter_seconds: 5
+failures_before_offline: 3
 database: onionwatcher.db
 services_directory: services
 tor_proxy: socks5h://127.0.0.1:9050
 web_port: 3040
-probe_interval: 30
-jitter_seconds: 5
-failures_before_offline: 3
-uptime_days: 7
+password_sha256: "abc257929..."
+max_history_events: 1000
+auth_max_failures: 10
+auth_lockout_seconds: 60
+```
+
+Define a password to access the web visualizer, and then obtain its SHA256 to insert into `config.yaml`
+```
+printf '%s' 'your-long-random-password' | sha256sum
 ```
 
 Services
