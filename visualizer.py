@@ -1,35 +1,333 @@
-import sqlite3
-import yaml
+#!/usr/bin/env python3
+
 import datetime
+import hashlib
+import hmac
+import sqlite3
+from pathlib import Path
 
-from flask import Flask, render_template_string, jsonify
+import yaml
+from flask import Flask, abort, request, render_template_string
 
 
-with open("config.yaml") as f:
-    config = yaml.safe_load(f)
+# ============================================================================
+# Configuration
+# ============================================================================
 
-DB = config.get("database", "onionwatcher.db")
-PORT = config.get("web_port", 8080)
-UPTIME_DAYS = config.get("uptime_days", 7)
+BASE_DIR = Path(__file__).resolve().parent
 
-app = Flask(__name__)
+CONFIG_FILE = BASE_DIR / "config.yaml"
 
+with CONFIG_FILE.open("r", encoding="utf-8") as f:
+    config = yaml.safe_load(f) or {}
+
+DB = Path(config.get("database", "onionwatcher.db"))
+
+if not DB.is_absolute():
+    DB = BASE_DIR / DB
+
+PORT = int(config.get("web_port", 8080))
+
+UPTIME_DAYS = max(
+    1,
+    min(int(config.get("uptime_days", 7)), 365),
+)
+
+# Password SHA-256 digest.
+#
+# Example:
+#
+#   printf '%s' 'your-long-password' | sha256sum
+#
+# Put the resulting 64-character hexadecimal digest in config.yaml:
+#
+#   password_sha256: "..."
+#
+PASSWORD_SHA256 = str(
+    config.get("password_sha256", "")
+).strip().lower()
+
+if (
+    len(PASSWORD_SHA256) != 64
+    or any(c not in "0123456789abcdef" for c in PASSWORD_SHA256)
+):
+    raise RuntimeError(
+        "config.yaml must contain a valid 64-character "
+        "password_sha256 hexadecimal digest"
+    )
+
+# History display is bounded.
+#
+# This does NOT affect uptime calculation.
+MAX_HISTORY_EVENTS = max(
+    1,
+    min(int(config.get("max_history_events", 1000)), 10000),
+)
+
+# Authentication failure throttling.
+#
+# This is deliberately simple and bounded. It is not intended to replace
+# Tor access control.
+AUTH_MAX_FAILURES = max(
+    1,
+    min(int(config.get("auth_max_failures", 10)), 1000),
+)
+
+AUTH_LOCKOUT_SECONDS = max(
+    1,
+    min(int(config.get("auth_lockout_seconds", 60)), 3600),
+)
+
+
+# ============================================================================
+# Flask
+# ============================================================================
+
+app = Flask(
+    __name__,
+    static_folder=None,
+)
+
+# No Flask session is used.
+# No cookies are required.
+# HTTP Basic Authentication is used only to request the password.
+
+
+# ============================================================================
+# Database
+# ============================================================================
 
 def db():
-    conn = sqlite3.connect(DB)
+    """
+    Open SQLite read-only.
+
+    Filesystem permissions must independently ensure that the account
+    running this process cannot modify the database or its directory.
+    """
+
+    uri = DB.resolve().as_uri() + "?mode=ro"
+
+    conn = sqlite3.connect(
+        uri,
+        uri=True,
+        timeout=5,
+    )
+
     conn.row_factory = sqlite3.Row
+
+    # Defense in depth.
+    conn.execute("PRAGMA query_only = ON")
+
     return conn
 
+
+# ============================================================================
+# Authentication
+# ============================================================================
+
+auth_failures = 0
+auth_locked_until = 0.0
+
+
+def unauthorized():
+    """
+    Return a Basic Auth challenge.
+
+    Only the password is meaningful. The username is deliberately ignored.
+    """
+
+    response = (
+        "Authentication required",
+        401,
+        {
+            "WWW-Authenticate": 'Basic realm="OnionWatcher"',
+            "Cache-Control": "no-store",
+        },
+    )
+
+    return response
+
+
+def authenticated():
+    """
+    Validate the HTTP Basic Authentication password.
+
+    The username is ignored.
+
+    The supplied password is hashed with SHA-256 and compared with the
+    configured digest using constant-time comparison.
+    """
+
+    global auth_failures
+    global auth_locked_until
+
+    import base64
+    import time
+
+    now = time.monotonic()
+
+    # Temporary lockout applies only after repeated failures.
+    if now < auth_locked_until:
+        return False
+
+    header = request.headers.get("Authorization", "")
+
+    if not header.startswith("Basic "):
+        return False
+
+    encoded = header[6:].strip()
+
+    try:
+        decoded = base64.b64decode(
+            encoded,
+            validate=True,
+        ).decode("utf-8")
+    except (
+        ValueError,
+        UnicodeDecodeError,
+    ):
+        return False
+
+    # Basic Auth is username:password.
+    #
+    # The username is ignored. split(":", 1) is important because the
+    # password itself may contain ':'.
+    if ":" not in decoded:
+        return False
+
+    _, password = decoded.split(":", 1)
+
+    supplied_digest = hashlib.sha256(
+        password.encode("utf-8")
+    ).hexdigest()
+
+    if hmac.compare_digest(
+        supplied_digest,
+        PASSWORD_SHA256,
+    ):
+        # Successful authentication clears the failure state.
+        auth_failures = 0
+        auth_locked_until = 0.0
+
+        return True
+
+    auth_failures += 1
+
+    if auth_failures >= AUTH_MAX_FAILURES:
+        auth_locked_until = (
+            now + AUTH_LOCKOUT_SECONDS
+        )
+        auth_failures = 0
+
+    return False
+
+
+@app.before_request
+def require_authentication():
+    """
+    Protect every HTTP endpoint.
+
+    The application is intended to sit behind a Tor onion service.
+    Authentication is an additional application-level password boundary.
+    """
+
+    if not authenticated():
+        return unauthorized()
+
+
+# ============================================================================
+# Security headers
+# ============================================================================
+
+@app.after_request
+def security_headers(response):
+
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; "
+        "script-src 'none'; "
+        "style-src 'unsafe-inline'; "
+        "img-src 'self'; "
+        "object-src 'none'; "
+        "base-uri 'none'; "
+        "form-action 'none'; "
+        "frame-ancestors 'none'"
+    )
+
+    response.headers["X-Content-Type-Options"] = "nosniff"
+
+    response.headers["X-Frame-Options"] = "DENY"
+
+    response.headers["Referrer-Policy"] = "no-referrer"
+
+    response.headers["Cache-Control"] = "no-store"
+
+    return response
+
+
+# ============================================================================
+# Time handling
+# ============================================================================
+
+UTC = datetime.timezone.utc
+
+DB_TIME_FORMAT = "%Y-%m-%dT%H:%M:%S.%f"
+
+
+def parse_timestamp(value):
+    """
+    Accept only:
+
+        YYYY-MM-DDTHH:MM:SS.ffffff
+
+    The database timestamp is interpreted as UTC.
+    """
+
+    if not isinstance(value, str):
+        return None
+
+    # Reject non-canonical representations explicitly.
+    if len(value) != 26:
+        return None
+
+    try:
+        dt = datetime.datetime.strptime(
+            value,
+            DB_TIME_FORMAT,
+        )
+    except ValueError:
+        return None
+
+    return dt.replace(tzinfo=UTC)
+
+
+def database_timestamp(dt):
+    return dt.astimezone(UTC).strftime(
+        DB_TIME_FORMAT
+    )
+
+
+# ============================================================================
+# Formatting
+# ============================================================================
+
 def format_duration(seconds):
-    seconds = int(seconds)
 
-    days = seconds // 86400
-    seconds %= 86400
+    seconds = max(0, int(seconds))
 
-    hours = seconds // 3600
-    seconds %= 3600
+    days, seconds = divmod(
+        seconds,
+        86400,
+    )
 
-    minutes = seconds // 60
+    hours, seconds = divmod(
+        seconds,
+        3600,
+    )
+
+    minutes, _ = divmod(
+        seconds,
+        60,
+    )
 
     parts = []
 
@@ -42,354 +340,816 @@ def format_duration(seconds):
     if minutes:
         parts.append(f"{minutes}m")
 
-    if not parts:
-        return "<1m"
-
-    return " ".join(parts)
-
-
-def services():
-    c = db()
-
-    rows = c.execute("""
-        SELECT
-            services.*,
-            service_state.status
-        FROM services
-        JOIN service_state
-        ON services.id = service_state.service_id
-        WHERE services.id IN (
-            SELECT service_id
-            FROM service_state
-        )
-        ORDER BY services.name
-    """).fetchall()
-
-    c.close()
-    return rows
-
-
-def events(service_id):
-    c = db()
-    rows = c.execute("""
-        SELECT *
-        FROM events
-        WHERE service_id=?
-        ORDER BY timestamp ASC
-    """, (service_id,)).fetchall()
-    c.close()
-    return rows
-
-
-def uptime_data(service_id):
-    now = datetime.datetime.utcnow()
-    start = now - datetime.timedelta(days=UPTIME_DAYS)
-
-    ev = events(service_id)
-
-    if not ev:
-         return 0, ["red"] * (UPTIME_DAYS * 24)
-
-    offline = False
-    offline_start = start
-    offline_seconds = 0
-
-    for e in ev:
-        t = datetime.datetime.fromisoformat(e["timestamp"])
-
-        if t < start:
-            continue
-
-        if e["new_status"] == "offline":
-            offline = True
-            offline_start = max(t, start)
-
-        elif e["new_status"] == "online" and offline:
-            offline = False
-            offline_seconds += (
-                min(t, now) - offline_start
-            ).total_seconds()
-
-    if offline:
-        offline_seconds += (
-            now - offline_start
-        ).total_seconds()
-
-    total = (now - start).total_seconds()
-
-    uptime = max(
-        0,
-        100 * (total - offline_seconds) / total
+    return (
+        " ".join(parts)
+        if parts
+        else "<1m"
     )
 
-    blocks = []
+
+# ============================================================================
+# Services
+# ============================================================================
+
+def services():
+
+    conn = db()
+
+    try:
+
+        return conn.execute(
+            """
+            SELECT
+                services.id,
+                services.name,
+                services.host,
+                service_state.status
+            FROM services
+            JOIN service_state
+              ON services.id = service_state.service_id
+            ORDER BY services.name
+            """
+        ).fetchall()
+
+    finally:
+        conn.close()
+
+
+def service(service_id):
+
+    conn = db()
+
+    try:
+
+        return conn.execute(
+            """
+            SELECT
+                services.id,
+                services.name,
+                services.host,
+                service_state.status
+            FROM services
+            JOIN service_state
+              ON services.id = service_state.service_id
+            WHERE services.id = ?
+            """,
+            (service_id,),
+        ).fetchone()
+
+    finally:
+        conn.close()
+
+
+# ============================================================================
+# Uptime events
+# ============================================================================
+
+def uptime_events(
+    service_id,
+    start,
+    end,
+):
+    """
+    Fetch the state immediately before the window and every event in the
+    requested window.
+
+    There is deliberately no LIMIT here.
+    """
+
+    start_s = database_timestamp(start)
+    end_s = database_timestamp(end)
+
+    conn = db()
+
+    try:
+
+        previous = conn.execute(
+            """
+            SELECT timestamp, new_status
+            FROM events
+            WHERE service_id = ?
+              AND timestamp < ?
+            ORDER BY timestamp DESC, rowid DESC
+            LIMIT 1
+            """,
+            (
+                service_id,
+                start_s,
+            ),
+        ).fetchone()
+
+        current = conn.execute(
+            """
+            SELECT timestamp, new_status
+            FROM events
+            WHERE service_id = ?
+              AND timestamp >= ?
+              AND timestamp <= ?
+            ORDER BY timestamp ASC, rowid ASC
+            """,
+            (
+                service_id,
+                start_s,
+                end_s,
+            ),
+        ).fetchall()
+
+        result = []
+
+        if previous is not None:
+            result.append(previous)
+
+        result.extend(current)
+
+        return result
+
+    finally:
+        conn.close()
+
+
+# ============================================================================
+# History
+# ============================================================================
+
+def history_events(service_id):
+
+    conn = db()
+
+    try:
+
+        return conn.execute(
+            """
+            SELECT timestamp, new_status
+            FROM events
+            WHERE service_id = ?
+            ORDER BY timestamp DESC, rowid DESC
+            LIMIT ?
+            """,
+            (
+                service_id,
+                MAX_HISTORY_EVENTS,
+            ),
+        ).fetchall()
+
+    finally:
+        conn.close()
+
+
+# ============================================================================
+# Uptime calculation
+# ============================================================================
+
+def uptime_data(service_id):
+
+    now = datetime.datetime.now(UTC)
+
+    start = (
+        now
+        - datetime.timedelta(
+            days=UPTIME_DAYS
+        )
+    )
+
+    raw = uptime_events(
+        service_id,
+        start,
+        now,
+    )
+
+    events = []
+
+    for event in raw:
+
+        timestamp = parse_timestamp(
+            event["timestamp"]
+        )
+
+        if timestamp is None:
+            continue
+
+        status = event["new_status"]
+
+        if status not in (
+            "online",
+            "offline",
+        ):
+            continue
+
+        events.append(
+            (
+                timestamp,
+                status,
+            )
+        )
+
     hours = UPTIME_DAYS * 24
 
-    for i in range(hours):
+    if not events:
+        return (
+            None,
+            0.0,
+            ["gray"] * hours,
+        )
 
-        a = start + datetime.timedelta(hours=i)
-        b = a + datetime.timedelta(hours=1)
+    # Establish state at the start of the reporting window.
+    state = None
+    event_index = 0
 
-        offline_time = 0
+    while event_index < len(events):
 
-        state = "online"
+        timestamp, new_state = events[
+            event_index
+        ]
 
-        # determine state at beginning of this block
-        for e in ev:
-            t = datetime.datetime.fromisoformat(e["timestamp"])
+        if timestamp >= start:
+            break
 
-            if t <= a:
-                state = e["new_status"]
-            else:
-                break
+        state = new_state
+        event_index += 1
 
+    # Events exactly at the start take effect immediately.
+    while event_index < len(events):
 
-        cursor = a
+        timestamp, new_state = events[
+            event_index
+        ]
 
-        for e in ev:
+        if timestamp != start:
+            break
 
-            t = datetime.datetime.fromisoformat(e["timestamp"])
+        state = new_state
+        event_index += 1
 
-            if t <= a:
+    total_known = 0.0
+    total_online = 0.0
+
+    blocks = []
+
+    current = start
+
+    for _ in range(hours):
+
+        block_end = min(
+            current
+            + datetime.timedelta(
+                hours=1
+            ),
+            now,
+        )
+
+        cursor = current
+
+        block_known = 0.0
+        block_offline = 0.0
+
+        # Events are consumed exactly once.
+        while event_index < len(events):
+
+            timestamp, new_state = events[
+                event_index
+            ]
+
+            if timestamp < current:
+                state = new_state
+                event_index += 1
                 continue
 
-            if t >= b:
+            if timestamp >= block_end:
                 break
 
-            if state == "offline":
-                offline_time += (
-                    t - cursor
+            if state is not None:
+
+                duration = (
+                    timestamp - cursor
                 ).total_seconds()
 
-            state = e["new_status"]
-            cursor = t
+                if duration > 0:
 
+                    block_known += duration
+                    total_known += duration
 
-        if state == "offline":
-            offline_time += (
-                b - cursor
+                    if state == "online":
+                        total_online += duration
+
+                    elif state == "offline":
+                        block_offline += duration
+
+            state = new_state
+            cursor = timestamp
+            event_index += 1
+
+        # Account for the remainder of the block.
+        if (
+            cursor < block_end
+            and state is not None
+        ):
+
+            duration = (
+                block_end - cursor
             ).total_seconds()
 
+            if duration > 0:
 
-        # mark hour red if any significant outage occurred
-        blocks.append(
-            "red" if offline_time > 0 else "green"
-        )
-    return uptime, blocks
+                block_known += duration
+                total_known += duration
 
+                if state == "online":
+                    total_online += duration
+
+                elif state == "offline":
+                    block_offline += duration
+
+        if block_known == 0:
+            blocks.append("gray")
+
+        elif block_offline > 0:
+            blocks.append("red")
+
+        else:
+            blocks.append("green")
+
+        current = block_end
+
+        if current >= now:
+            break
+
+    total = (
+        now - start
+    ).total_seconds()
+
+    coverage = (
+        100.0
+        * total_known
+        / total
+        if total > 0
+        else 0.0
+    )
+
+    uptime = (
+        100.0
+        * total_online
+        / total_known
+        if total_known > 0
+        else None
+    )
+
+    while len(blocks) < hours:
+        blocks.append("gray")
+
+    return (
+        uptime,
+        coverage,
+        blocks,
+    )
+
+
+# ============================================================================
+# Templates
+# ============================================================================
 
 INDEX = """
-<html>
+<!doctype html>
+
+<html lang="en">
+
 <head>
+
+<meta charset="utf-8">
+
+<meta name="viewport"
+      content="width=device-width,initial-scale=1">
+
+<title>OnionWatcher</title>
+
 <style>
-body { font-family: monospace; background:#111; color:#eee; }
-table { border-collapse:collapse; }
-td,th { padding:8px; }
-.bar { display:flex; width:300px; height:8px; }
-.block { flex:1; }
 
-tr.service-row:nth-of-type(odd),
-tr.service-dark,
-.details-dark {
-    background:#000000;
+body {
+    font-family: monospace;
+    background: #111;
+    color: #eee;
+    margin: 2rem;
 }
 
-.service-gray,
-.details-gray {
-    background:#123;
+table {
+    border-collapse: collapse;
+    width: 100%;
+    max-width: 1100px;
 }
 
-.unknown { color:#cc3333; }
-.green { color:#00ff66; }
-.red { color:#cc3333; }
+td,
+th {
+    padding: 8px;
+    text-align: left;
+}
+
+tr:nth-child(even) {
+    background: #181818;
+}
+
+a {
+    color: #66aaff;
+}
+
+.online {
+    color: #00cc66;
+}
+
+.offline {
+    color: #cc3333;
+}
+
+.unknown {
+    color: #999;
+}
+
+.bar {
+    display: flex;
+    width: 300px;
+    height: 8px;
+}
+
+.block {
+    flex: 1;
+}
 
 .block.green {
-    background:#00aa00;
+    background: #00aa00;
 }
 
 .block.red {
-    background:#aa0000;
+    background: #aa0000;
 }
-.online { color:#00cc66; }
-.offline { color:#cc3333; }
-.details {
-    display:none;
-    padding:10px;
-    height:8em;
-    overflow-y:auto;
-    width:100%;
-    box-sizing:border-box;
+
+.block.gray {
+    background: #555;
 }
+
+.small {
+    color: #999;
+    font-size: 0.9em;
+}
+
 </style>
 
-<script>
-function showDetails(id) {
-    let d=document.getElementById("details-"+id);
-    if (d.style.display==="block") {
-        d.style.display="none";
-        return;
-    }
-    fetch("/service/"+id)
-    .then(r=>r.text())
-    .then(t=>{
-        d.innerHTML=t;
-        d.style.display="block";
-    });
-}
-</script>
 </head>
 
 <body>
 
 <h1>OnionWatcher</h1>
 
+<p class="small">
+Last {{ uptime_days }}
+{{ "day" if uptime_days == 1 else "days" }}.
+Uptime is calculated only over periods where the state is known.
+</p>
+
 <table>
-<colgroup>
-<col>
-<col>
-<col>
-<col>
-</colgroup>
+
+<thead>
 
 <tr>
 <th>Service</th>
-<th>Last {{ UPTIME_DAYS }} {{ "day" if UPTIME_DAYS == 1 else "days" }}</th>
+<th>History</th>
 <th>Uptime</th>
+<th>Coverage</th>
 <th>Onion</th>
 </tr>
 
+</thead>
+
+<tbody>
+
 {% for s in services %}
-{% set rowclass = 'dark' if loop.index0 % 2 == 0 else 'gray' %}
 
-<tr class="service-row service-{{rowclass}}">
+<tr>
+
 <td>
-<a onclick="showDetails({{s.id}})"
-class="{{s.status}}">
-{{s.name}}
+
+<a href="/service/{{ s.id }}"
+   class="{{ s.status }}">
+
+{{ s.name }}
+
 </a>
+
 </td>
 
 <td>
-<div class="bar">
-{% for c in bars[s.id] %}
-<div class="block {{c}}"></div>
+
+<div class="bar"
+     aria-label="Hourly uptime history">
+
+{% for block in bars[s.id] %}
+
+<div class="block {{ block }}"></div>
+
 {% endfor %}
+
 </div>
+
 </td>
 
-<td>{{"%.2f"|format(uptime[s.id])}}%</td>
-
-<td>{{s.host}}</td>
-
-</tr>
-
-<tr class="details-row details-{{rowclass}}">
 <td>
-<div class="details" id="details-{{s.id}}"></div>
+
+{% if uptime[s.id] is none %}
+
+<span class="unknown">
+unknown
+</span>
+
+{% else %}
+
+{{ "%.2f"|format(uptime[s.id]) }}%
+
+{% endif %}
+
 </td>
-<td colspan="3"></td>
+
+<td>
+
+{{ "%.2f"|format(coverage[s.id]) }}%
+
+</td>
+
+<td>
+
+{{ s.host }}
+
+</td>
+
 </tr>
 
 {% endfor %}
+
+</tbody>
 
 </table>
 
 </body>
+
 </html>
 """
 
 
+SERVICE = """
+<!doctype html>
+
+<html lang="en">
+
+<head>
+
+<meta charset="utf-8">
+
+<meta name="viewport"
+      content="width=device-width,initial-scale=1">
+
+<title>{{ service.name }} - OnionWatcher</title>
+
+<style>
+
+body {
+    font-family: monospace;
+    background: #111;
+    color: #eee;
+    margin: 2rem;
+}
+
+a {
+    color: #66aaff;
+}
+
+.online {
+    color: #00ff66;
+}
+
+.offline {
+    color: #cc3333;
+}
+
+.unknown {
+    color: #999;
+}
+
+.event {
+    margin: 0.25rem 0;
+}
+
+</style>
+
+</head>
+
+<body>
+
+<p>
+<a href="/">Back</a>
+</p>
+
+<h1>{{ service.name }}</h1>
+
+<p>
+Current status:
+<span class="{{ service.status }}">
+{{ service.status }}
+</span>
+</p>
+
+<p>
+{{ service.host }}
+</p>
+
+{% if events %}
+
+{% for event in events %}
+
+<div class="event {{ event.status }}">
+
+{{ event.timestamp }}
+
+({{ event.duration }})
+
+</div>
+
+{% endfor %}
+
+{% else %}
+
+<p class="unknown">
+No valid history available.
+</p>
+
+{% endif %}
+
+</body>
+
+</html>
+"""
+
+
+# ============================================================================
+# Routes
+# ============================================================================
+
 @app.route("/")
 def index():
+
     svcs = services()
+
     uptime = {}
+    coverage = {}
     bars = {}
 
     for s in svcs:
-        u, b = uptime_data(s["id"])
+
+        u, c, b = uptime_data(
+            s["id"]
+        )
+
         uptime[s["id"]] = u
+        coverage[s["id"]] = c
         bars[s["id"]] = b
 
     return render_template_string(
         INDEX,
         services=svcs,
         uptime=uptime,
+        coverage=coverage,
         bars=bars,
-        UPTIME_DAYS=UPTIME_DAYS
+        uptime_days=UPTIME_DAYS,
     )
 
 
-@app.route("/service/<int:id>")
-def service_page(id):
+@app.route("/service/<int:service_id>")
+def service_page(service_id):
 
-    ev = events(id)
+    svc = service(service_id)
 
-    rev = list(reversed(ev))
+    if svc is None:
+        abort(404)
 
-    result = ""
+    raw_events = history_events(
+        service_id
+    )
 
-    now = datetime.datetime.utcnow()
+    now = datetime.datetime.now(UTC)
 
-    for i, e in enumerate(rev):
+    parsed = []
 
-        t = datetime.datetime.fromisoformat(
-            e["timestamp"]
+    for event in raw_events:
+
+        timestamp = parse_timestamp(
+            event["timestamp"]
         )
 
-        if i == 0:
+        if timestamp is None:
+            continue
 
-            duration = (
-                now - t
-            ).total_seconds()
+        status = event["new_status"]
 
-        else:
+        if status not in (
+            "online",
+            "offline",
+        ):
+            continue
 
-            next_event = rev[i-1]
-
-            next_time = datetime.datetime.fromisoformat(
-                next_event["timestamp"]
+        parsed.append(
+            (
+                timestamp,
+                status,
             )
-
-            duration = (
-                next_time - t
-            ).total_seconds()
-
-
-        color = (
-            "#00ff66"
-            if e["new_status"] == "online"
-            else "#cc3333"
         )
 
+    history = []
 
-        result += (
-            f'<div style="color:{color};">'
-            f'{e["timestamp"]} '
-            f'({format_duration(duration)})'
-            f'</div>'
+    for index, (
+        timestamp,
+        status,
+    ) in enumerate(parsed):
+
+        if index == 0:
+            end = now
+        else:
+            end = parsed[
+                index - 1
+            ][0]
+
+        duration = max(
+            0,
+            (
+                end - timestamp
+            ).total_seconds(),
         )
 
+        history.append(
+            {
+                "timestamp":
+                    timestamp.strftime(
+                        "%Y-%m-%d %H:%M:%S UTC"
+                    ),
 
-    return result
+                "status": status,
 
-@app.route("/status/<string:service_name>")
+                "duration":
+                    format_duration(
+                        duration
+                    ),
+            }
+        )
+
+    return render_template_string(
+        SERVICE,
+        service=svc,
+        events=history,
+    )
+
+
+@app.route(
+    "/status/<string:service_name>"
+)
 def status(service_name):
-    c = db()
 
-    row = c.execute("""
-        SELECT service_state.status
-        FROM services
-        JOIN service_state
-        ON services.id = service_state.service_id
-        WHERE services.name = ?
-    """, (service_name,)).fetchone()
+    if not (
+        1 <= len(service_name) <= 128
+    ):
+        abort(404)
 
-    c.close()
+    conn = db()
+
+    try:
+
+        row = conn.execute(
+            """
+            SELECT service_state.status
+            FROM services
+            JOIN service_state
+              ON services.id =
+                 service_state.service_id
+            WHERE services.name = ?
+            LIMIT 1
+            """,
+            (service_name,),
+        ).fetchone()
+
+    finally:
+        conn.close()
 
     if row is None:
         return "0", 404
 
-    return "1" if row["status"] == "online" else "0"
+    return (
+        "1"
+        if row["status"] == "online"
+        else "0"
+    )
+
+
+# ============================================================================
+# Localhost-only development entry point
+# ============================================================================
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=PORT)
+
+    app.run(
+        host="127.0.0.1",
+        port=PORT,
+        debug=False,
+    )
