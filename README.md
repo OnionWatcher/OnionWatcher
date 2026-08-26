@@ -93,10 +93,15 @@ git clone https://github.com/onionwatcher/onionwatcher
 cd onionwatcher
 ```
 
-Exclude config files from future pulls:
+Create your local configs:
 ```
- git update-index --assume-unchanged config.yaml
- git update-index --assume-unchanged services/*.yaml
+mv config.yaml.example config.yaml
+nano config.yaml
+```
+and
+```
+mv services/services.yaml.example services/services.yaml
+nano services/services.yaml
 ```
 
 When you want to upgrade, from within the `onionwatcher` folder execute:
@@ -114,14 +119,23 @@ config.yaml
 
 Example:
 ```
+uptime_days: 7
+probe_interval: 30
+jitter_seconds: 5
+failures_before_offline: 3
 database: onionwatcher.db
 services_directory: services
 tor_proxy: socks5h://127.0.0.1:9050
 web_port: 3040
-probe_interval: 30
-jitter_seconds: 5
-failures_before_offline: 3
-uptime_days: 7
+password_sha256: "abc257929..."
+max_history_events: 1000
+auth_max_failures: 10
+auth_lockout_seconds: 60
+```
+
+Define a password to access the web visualizer, and then obtain its SHA256 to insert into `config.yaml`
+```
+printf '%s' 'your-long-random-password' | sha256sum
 ```
 
 Services
