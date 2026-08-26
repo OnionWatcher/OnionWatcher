@@ -6,3 +6,7 @@ database: onionwatcher.db
 services_directory: services
 tor_proxy: socks5h://127.0.0.1:9050
 web_port: 3040
+password_sha256: "PUT_SHA256_DIGEST_HERE"
+max_history_events: 1000
+auth_max_failures: 10
+auth_lockout_seconds: 60
