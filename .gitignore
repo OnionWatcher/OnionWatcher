@@ -9,3 +9,7 @@ services/*.yaml
 
 # Keep the example files tracked
 !services/example.yaml
+
+venv/
+onionwatcher.db
+onionwatcher.db-*
