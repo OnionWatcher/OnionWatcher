@@ -407,13 +407,12 @@ def load_services(directory):
 
 class Prober:
 
-    def __init__(self, proxy):
-
+    def __init__(self, proxy, control_port):
         self.proxy = proxy
+        self.control_port = control_port
         self.session = None
 
         self.new_session()
-
 
     def new_session(self):
 
@@ -435,7 +434,7 @@ class Prober:
             from stem import Signal
             from stem.control import Controller
 
-            with Controller.from_port(port=9051) as controller:
+            with Controller.from_port(port=self.control_port) as controller:
 
                 controller.authenticate()
 
@@ -558,7 +557,7 @@ class Prober:
             )
 
             proxy_host = (
-                self.session.proxies["http"]
+                self.proxy
                 .replace("socks5h://", "")
                 .split(":")
             )
@@ -586,7 +585,6 @@ class Prober:
         except Exception:
 
             return False
-
 
 # ==========================================================
 # Main
@@ -636,10 +634,13 @@ def main():
     prober = Prober(
         config.get(
             "tor_proxy",
-            "socks5h://127.0.0.1:9050"
+            "socks5h://127.0.0.1:9060"
+        ),
+        config.get(
+            "tor_control_port",
+            9061
         )
     )
-
 
     max_failures = config.get(
         "failures_before_offline",
