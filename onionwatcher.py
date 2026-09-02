@@ -409,21 +409,34 @@ class Prober:
 
     def __init__(self, proxy):
 
+        self.proxy = proxy
+        self.session = None
+
+        self.new_session()
+
+
+    def new_session(self):
+
+        if self.session is not None:
+            self.session.close()
+
         self.session = requests.Session()
 
         self.session.proxies = {
-            "http": proxy,
-            "https": proxy
+            "http": self.proxy,
+            "https": self.proxy
         }
 
 
-
     def new_circuit(self):
+
         try:
+
             from stem import Signal
             from stem.control import Controller
 
             with Controller.from_port(port=9051) as controller:
+
                 controller.authenticate()
 
                 controller.signal(Signal.NEWNYM)
@@ -432,8 +445,12 @@ class Prober:
 
                 time.sleep(3)
 
+                self.new_session()
+
                 for circuit in controller.get_circuits():
+
                     if circuit.status == "BUILT":
+
                         path = []
 
                         for relay, _ in circuit.path:
@@ -450,6 +467,7 @@ class Prober:
                 return True
 
         except Exception as e:
+
             log(
                 f"Tor circuit change failed: {e}"
             )
@@ -498,10 +516,10 @@ class Prober:
 
             return response.status_code < 500
 
-
         except Exception:
 
             return False
+
 
     def monerod(self, service):
 
@@ -521,15 +539,14 @@ class Prober:
             if response.status_code != 200:
                 return False
 
-
             data = response.json()
 
             return data.get("status") == "OK"
 
-
         except Exception:
 
             return False
+
 
     def tcp(self, service):
 
@@ -546,7 +563,6 @@ class Prober:
                 .split(":")
             )
 
-
             s.set_proxy(
                 socks.SOCKS5,
                 proxy_host[0],
@@ -554,9 +570,7 @@ class Prober:
                 rdns=True
             )
 
-
             s.settimeout(30)
-
 
             s.connect(
                 (
@@ -565,16 +579,13 @@ class Prober:
                 )
             )
 
-
             s.close()
 
             return True
 
-
         except Exception:
 
             return False
-
 
 
 # ==========================================================
@@ -764,6 +775,10 @@ def main():
                         retry_service["id"]
                     )
 
+                    db.set_status(
+                        retry_service["id"],
+                        "online"
+                    )
 
                 else:
 
