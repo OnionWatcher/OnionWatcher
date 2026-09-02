@@ -740,8 +740,6 @@ def main():
                     )
 
 
-        checked_id = service["id"]
-
 
 
         # -------------------------------
@@ -750,79 +748,63 @@ def main():
 
         if retry_queue:
 
-            retry_service = retry_queue[0]
+            retry_service = retry_queue.popleft()
 
-            if retry_service["id"] != checked_id:
+            log(
+                f"Retrying {retry_service['name']}"
+            )
 
-                retry_service = retry_queue.popleft()
+            ok = prober.probe(
+                retry_service
+            )
+
+            if ok:
 
                 log(
-                    f"Retrying {retry_service['name']}"
+                    "Retry succeeded"
                 )
 
-
-                ok = prober.probe(
-                    retry_service
+                db.reset_failures(
+                    retry_service["id"]
                 )
 
-
-                if ok:
-
-                    log(
-                        "Retry succeeded"
-                    )
-
-                    db.reset_failures(
-                        retry_service["id"]
-                    )
-
-                    db.set_status(
-                        retry_service["id"],
-                        "online"
-                    )
-
-                else:
-
-                    log(
-                        "Retry failed"
-                    )
-
-                    db.increase_failure(
-                        retry_service["id"]
-                    )
-
-
-                    state = db.state(
-                        retry_service["id"]
-                    )
-
-
-                    if state["failures"] >= max_failures:
-
-                        db.set_status(
-                            retry_service["id"],
-                            "offline"
-                        )
-
-                        log(
-                            "Certified OFFLINE"
-                        )
-
-                    else:
-
-                        prober.new_circuit()
-
-                        retry_queue.append(
-                            retry_service
-                        )
-
+                db.set_status(
+                    retry_service["id"],
+                    "online"
+                )
 
             else:
 
                 log(
-                    "Skipping duplicate retry in same cycle"
+                    "Retry failed"
                 )
 
+                db.increase_failure(
+                    retry_service["id"]
+                )
+
+                state = db.state(
+                    retry_service["id"]
+                )
+
+                if state["failures"] >= max_failures:
+
+                    db.set_status(
+                        retry_service["id"],
+                        "offline"
+                    )
+
+                    log(
+                        "Certified OFFLINE"
+                    )
+
+                else:
+
+                    prober.new_circuit()
+
+                    retry_queue.append(
+                        retry_service
+                    )
 
 
         sleep_time = (
