@@ -55,31 +55,41 @@ pip install -r requirements.txt
 
 Tor configuration
 
-OnionWatcher requires these in `/etc/tor/torrc`:
+Create dedicated Tor instance:
 ```
-SocksPort 9050
-ControlPort 9051
+sudo tor-instance-create onionwatcher
+sudo nano /etc/tor/instances/onionwatcher/torrc
+```
+
+and replace default content:
+```
+SocksPort 127.0.0.1:9060
+ControlPort 127.0.0.1:9061
+
 CookieAuthentication 1
 CookieAuthFileGroupReadable 1
+
+DataDirectory /var/lib/tor-instances/onionwatcher
 ```
-Restart Tor:
+
+Enable and start Tor instance:
 ```
-sudo systemctl restart tor
+sudo systemctl enable --now tor@onionwatcher
 ```
 
 The user running OnionWatcher must be able to access the Tor control cookie.
 
 Example:
 ```
-sudo usermod -aG debian-tor onionwatcher
+sudo usermod -aG _tor-onionwatcher onionwatcher
 ```
-Log out and back in after changing groups, or issue `newgrp debian-tor`.
+Log out and back in after changing groups, or issue `newgrp _tor-onionwatcher`.
 
 Test:
 ```
 python3 -c "
 from stem.control import Controller
-with Controller.from_port(port=9051) as c:
+with Controller.from_port(port=9061) as c:
     c.authenticate()
     print('Tor control OK')
 "
