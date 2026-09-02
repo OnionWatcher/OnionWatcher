@@ -4,7 +4,8 @@ jitter_seconds: 5
 failures_before_offline: 3
 database: onionwatcher.db
 services_directory: services
-tor_proxy: socks5h://127.0.0.1:9050
+tor_proxy: socks5h://127.0.0.1:9060
+tor_control_port: 9061
 web_port: 3040
 password_sha256: "PUT_SHA256_DIGEST_HERE"
 max_history_events: 1000

@@ -407,23 +407,35 @@ def load_services(directory):
 
 class Prober:
 
-    def __init__(self, proxy):
+    def __init__(self, proxy, control_port):
+        self.proxy = proxy
+        self.control_port = control_port
+        self.session = None
+
+        self.new_session()
+
+    def new_session(self):
+
+        if self.session is not None:
+            self.session.close()
 
         self.session = requests.Session()
 
         self.session.proxies = {
-            "http": proxy,
-            "https": proxy
+            "http": self.proxy,
+            "https": self.proxy
         }
 
 
-
     def new_circuit(self):
+
         try:
+
             from stem import Signal
             from stem.control import Controller
 
-            with Controller.from_port(port=9051) as controller:
+            with Controller.from_port(port=self.control_port) as controller:
+
                 controller.authenticate()
 
                 controller.signal(Signal.NEWNYM)
@@ -432,8 +444,12 @@ class Prober:
 
                 time.sleep(3)
 
+                self.new_session()
+
                 for circuit in controller.get_circuits():
+
                     if circuit.status == "BUILT":
+
                         path = []
 
                         for relay, _ in circuit.path:
@@ -450,6 +466,7 @@ class Prober:
                 return True
 
         except Exception as e:
+
             log(
                 f"Tor circuit change failed: {e}"
             )
@@ -498,10 +515,10 @@ class Prober:
 
             return response.status_code < 500
 
-
         except Exception:
 
             return False
+
 
     def monerod(self, service):
 
@@ -521,15 +538,14 @@ class Prober:
             if response.status_code != 200:
                 return False
 
-
             data = response.json()
 
             return data.get("status") == "OK"
 
-
         except Exception:
 
             return False
+
 
     def tcp(self, service):
 
@@ -541,11 +557,10 @@ class Prober:
             )
 
             proxy_host = (
-                self.session.proxies["http"]
+                self.proxy
                 .replace("socks5h://", "")
                 .split(":")
             )
-
 
             s.set_proxy(
                 socks.SOCKS5,
@@ -554,9 +569,7 @@ class Prober:
                 rdns=True
             )
 
-
             s.settimeout(30)
-
 
             s.connect(
                 (
@@ -565,17 +578,13 @@ class Prober:
                 )
             )
 
-
             s.close()
 
             return True
 
-
         except Exception:
 
             return False
-
-
 
 # ==========================================================
 # Main
@@ -625,10 +634,13 @@ def main():
     prober = Prober(
         config.get(
             "tor_proxy",
-            "socks5h://127.0.0.1:9050"
+            "socks5h://127.0.0.1:9060"
+        ),
+        config.get(
+            "tor_control_port",
+            9061
         )
     )
-
 
     max_failures = config.get(
         "failures_before_offline",
@@ -728,8 +740,6 @@ def main():
                     )
 
 
-        checked_id = service["id"]
-
 
 
         # -------------------------------
@@ -738,75 +748,63 @@ def main():
 
         if retry_queue:
 
-            retry_service = retry_queue[0]
+            retry_service = retry_queue.popleft()
 
-            if retry_service["id"] != checked_id:
+            log(
+                f"Retrying {retry_service['name']}"
+            )
 
-                retry_service = retry_queue.popleft()
+            ok = prober.probe(
+                retry_service
+            )
+
+            if ok:
 
                 log(
-                    f"Retrying {retry_service['name']}"
+                    "Retry succeeded"
                 )
 
-
-                ok = prober.probe(
-                    retry_service
+                db.reset_failures(
+                    retry_service["id"]
                 )
 
-
-                if ok:
-
-                    log(
-                        "Retry succeeded"
-                    )
-
-                    db.reset_failures(
-                        retry_service["id"]
-                    )
-
-
-                else:
-
-                    log(
-                        "Retry failed"
-                    )
-
-                    db.increase_failure(
-                        retry_service["id"]
-                    )
-
-
-                    state = db.state(
-                        retry_service["id"]
-                    )
-
-
-                    if state["failures"] >= max_failures:
-
-                        db.set_status(
-                            retry_service["id"],
-                            "offline"
-                        )
-
-                        log(
-                            "Certified OFFLINE"
-                        )
-
-                    else:
-
-                        prober.new_circuit()
-
-                        retry_queue.append(
-                            retry_service
-                        )
-
+                db.set_status(
+                    retry_service["id"],
+                    "online"
+                )
 
             else:
 
                 log(
-                    "Skipping duplicate retry in same cycle"
+                    "Retry failed"
                 )
 
+                db.increase_failure(
+                    retry_service["id"]
+                )
+
+                state = db.state(
+                    retry_service["id"]
+                )
+
+                if state["failures"] >= max_failures:
+
+                    db.set_status(
+                        retry_service["id"],
+                        "offline"
+                    )
+
+                    log(
+                        "Certified OFFLINE"
+                    )
+
+                else:
+
+                    prober.new_circuit()
+
+                    retry_queue.append(
+                        retry_service
+                    )
 
 
         sleep_time = (
